@@ -1,0 +1,85 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile and overall progress for the FACHE Exam Architect app.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "overallScore": { "type": "number", "description": "Overall score out of 5" },
+        "domainScores": {
+          "type": "object",
+          "properties": {
+            "Healthcare": { "type": "number", "description": "Healthcare Environment domain score (1-5)" },
+            "ManagementAndLeadership": { "type": "number", "description": "Management & Leadership domain score (1-5)" },
+            "Finance": { "type": "number", "description": "Finance domain score (1-5)" },
+            "HumanResources": { "type": "number", "description": "Human Resources domain score (1-5)" },
+            "LawsAndRegulations": { "type": "number", "description": "Laws & Regulations domain score (1-5)" },
+            "QualityAndPerformance": { "type": "number", "description": "Quality & Performance Improvement domain score (1-5)" },
+            "Business": { "type": "number", "description": "Business domain score (1-5)" },
+            "HealthcareTechnology": { "type": "number", "description": "Healthcare Technology & Info Mgmt domain score (1-5)" },
+            "ProfessionalismAndEthics": { "type": "number", "description": "Professionalism & Ethics domain score (1-5)" },
+            "Governance": { "type": "number", "description": "Governance & Organizational Structure domain score (1-5)" }
+          }
+        },
+        "streak": {
+          "type": "object",
+          "properties": {
+            "currentStreak": { "type": "number" },
+            "longestStreak": { "type": "number" },
+            "lastStudyDate": { "type": "string" }
+          }
+        },
+        "badges": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of unlocked badge identifiers"
+        },
+        "studyDates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Unique ISO date strings of days user studied"
+        },
+        "domainHistory": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Chronological snapshots of domain mastery scores over time"
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastActive": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt", "lastActive"]
+    },
+    "StudySession": {
+      "title": "StudySession",
+      "description": "A record of a study session in one of the 4 modes.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "User ID" },
+        "mode": { "type": "string", "enum": ["Diagnostic", "Simulator", "Flashcards", "DeepDive"] },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "score": { "type": "number", "description": "Score achieved in this session if applicable" },
+        "summary": { "type": "string", "description": "Brief summary of the session" },
+        "history": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "JSON stringified chat history"
+        }
+      },
+      "required": ["uid", "mode", "timestamp"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Stores user profiles and overall progress."
+    },
+    "sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/StudySession" },
+      "description": "Stores individual study sessions."
+    }
+  }
+}
