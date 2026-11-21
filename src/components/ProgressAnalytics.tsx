@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { LOCAL_GUEST_UID, updateLocalProfile } from '../services/localStore';
 import DomainMasteryOverTime from './DomainMasteryOverTime';
 import ExportSummaryModal from './ExportSummaryModal';
 
@@ -307,14 +308,18 @@ export default function ProgressAnalytics({
         'Laws & Regulations (3.2/5) - Strengthen Stark Law and Anti-Kickback safe harbors.'
       ];
 
-      const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, {
+      const patch = {
         domainScores: sampleScores,
         overallScore: overall,
         strengths,
         weaknesses,
         lastActive: new Date().toISOString()
-      });
+      };
+      updateLocalProfile(patch);
+      if (user.uid !== LOCAL_GUEST_UID) {
+        const userRef = doc(db, 'users', user.uid);
+        await updateDoc(userRef, patch);
+      }
 
       if (onProfileUpdated) {
         onProfileUpdated({
@@ -360,12 +365,16 @@ export default function ProgressAnalytics({
       };
       const updatedHistory = [...existingHistory, newSnapshot].slice(-15);
 
-      await updateDoc(userRef, {
+      const scorePatch = {
         domainScores: updatedScores,
         overallScore: overall,
         domainHistory: updatedHistory,
         lastActive: new Date().toISOString()
-      });
+      };
+      updateLocalProfile(scorePatch);
+      if (user.uid !== LOCAL_GUEST_UID) {
+        await updateDoc(userRef, scorePatch);
+      }
 
       if (onProfileUpdated) {
         onProfileUpdated({

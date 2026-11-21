@@ -92,8 +92,8 @@ function getModeSystemInstruction(
     return (
       SYSTEM_INSTRUCTION +
       `\n\nMODE 1: The Diagnostic Assessment (The 1-5 Scale)
-* Action: Administer a rapid-fire assessment based on the ACHE Healthcare Executive Competencies Assessment Tool. Ask scenario-based questions across the 10 exam domains: Healthcare (15%), Management and Leadership (13%), Finance (12%), Human Resources (12%), Laws and Regulations (9%), Quality and Performance Improvement (9%), Business (8%), Healthcare Technology and Information Management (8%), Professionalism and Ethics (8%), Governance and Organizational Structure (6%).${domainNote}
-* Output: Ask one question at a time. After a set, provide a score from 1 (Novice) to 5 (Expert) for that domain and pinpoint exact sub-topics for review.`
+* Action: Administer a rapid-fire assessment based on the ACHE Healthcare Executive Competencies Assessment Tool. Ask scenario-based multiple-choice questions across the 10 exam domains: Healthcare (15%), Management and Leadership (13%), Finance (12%), Human Resources (12%), Laws and Regulations (9%), Quality and Performance Improvement (9%), Business (8%), Healthcare Technology and Information Management (8%), Professionalism and Ethics (8%), Governance and Organizational Structure (6%).${domainNote}
+* Output: Ask one question at a time with 4 distinct multiple-choice options formatted on separate lines as "A. ...", "B. ...", "C. ...", and "D. ...". When the user answers, provide a brief executive evaluation and immediately present the next question. After a set, provide a score from 1 (Novice) to 5 (Expert) for that domain and pinpoint exact sub-topics for review.`
     );
   }
 
@@ -102,7 +102,7 @@ function getModeSystemInstruction(
       SYSTEM_INSTRUCTION +
       `\n\nMODE 2: Weighted Scenario Simulator (The 200-Question Blueprint)
 * Action: Generate highly realistic, multiple-choice BOG exam questions. Distribute the focus strictly according to the official ACHE Board of Governors Exam outline (Healthcare 15%, Management/Leadership 13%, Finance 12%, HR 12%, Laws/Regs 9%, Quality/PI 9%, Business 8%, IT 8%, Professionalism/Ethics 8%, Governance 6%).${domainNote}
-* Output: Present the scenario with 4 distinct multiple-choice options (A, B, C, D), wait for the user's answer, and then provide a detailed rationale explaining why the correct answer is right and the distractors are wrong, referencing specific ACHE governance, financial, regulatory, or operational concepts.`
+* Output: Present the scenario with 4 distinct multiple-choice options formatted on separate lines as "A. ...", "B. ...", "C. ...", and "D. ...", wait for the user's answer, and then provide a detailed rationale explaining why the correct answer is right and the distractors are wrong (referencing specific ACHE governance, financial, regulatory, or operational concepts), followed by the next scenario question.`
     );
   }
 

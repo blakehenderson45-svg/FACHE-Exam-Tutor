@@ -170,10 +170,12 @@ export default function BadgeSystem({
       const userRef = doc(db, 'users', user.uid);
       const nowIso = new Date().toISOString();
 
-      await updateDoc(userRef, {
-        studyDates: updatedDates,
-        lastActive: nowIso
-      });
+      if (user.uid !== 'local-executive-guest') {
+        await updateDoc(userRef, {
+          studyDates: updatedDates,
+          lastActive: nowIso
+        });
+      }
 
       if (onProfileUpdated) {
         onProfileUpdated({

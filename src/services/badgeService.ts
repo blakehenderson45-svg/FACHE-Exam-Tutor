@@ -1,5 +1,6 @@
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { LOCAL_GUEST_UID, updateLocalProfile } from './localStore';
 import { ACHE_DOMAINS, PASSING_BENCHMARK } from '../components/ProgressAnalytics';
 
 export type BadgeCategory = 'streak' | 'domain' | 'milestone';
@@ -640,20 +641,26 @@ export async function syncBadgesAndStreak(
     currentStreakStored !== streakStats.currentStreak || longestStreakStored !== streakStats.longestStreak;
 
   if (hasNewBadges || streakChanged || !profile?.badges) {
-    try {
-      const userRef = doc(db, 'users', userId);
-      await updateDoc(userRef, {
-        badges: allUnlockedIds,
-        streak: {
-          currentStreak: streakStats.currentStreak,
-          longestStreak: streakStats.longestStreak,
-          lastStudyDate: streakStats.lastStudyDate || new Date().toISOString()
-        },
-        studyDates: streakStats.studyDates,
-        lastActive: new Date().toISOString()
-      });
-    } catch (err) {
-      console.error('Failed to sync badges to Firestore:', err);
+    const badgePatch = {
+      badges: allUnlockedIds,
+      streak: {
+        currentStreak: streakStats.currentStreak,
+        longestStreak: streakStats.longestStreak,
+        lastStudyDate: streakStats.lastStudyDate || new Date().toISOString()
+      },
+      studyDates: streakStats.studyDates,
+      lastActive: new Date().toISOString()
+    };
+
+    if (userId === LOCAL_GUEST_UID) {
+      updateLocalProfile(badgePatch);
+    } else {
+      try {
+        const userRef = doc(db, 'users', userId);
+        await updateDoc(userRef, badgePatch);
+      } catch (err) {
+        console.error('Failed to sync badges to Firestore:', err);
+      }
     }
   }
 

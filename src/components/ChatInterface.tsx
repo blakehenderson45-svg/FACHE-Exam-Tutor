@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Send,
@@ -16,7 +16,12 @@ import {
   Square,
   ExternalLink,
   Brain,
-  RotateCcw
+  RotateCcw,
+  Bookmark,
+  BookOpen,
+  Timer,
+  Pause,
+  Play
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -29,6 +34,16 @@ import {
 } from '../services/geminiService';
 import { collection, addDoc, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db, auth } from '../firebase';
+import {
+  isLocalGuestActive,
+  getLocalGuestUser,
+  getLocalProfile,
+  updateLocalProfile,
+  getLocalSessionById,
+  saveLocalSession
+} from '../services/localStore';
+import { getVaultItems, saveVaultItem } from '../services/vaultService';
+import ExecutiveReferenceModal from './ExecutiveReferenceModal';
 import ThemeToggle from './ThemeToggle';
 
 interface Message {
@@ -38,30 +53,102 @@ interface Message {
   isError?: boolean;
 }
 
+interface ParsedMcqOption {
+  letter: 'A' | 'B' | 'C' | 'D';
+  text: string;
+}
+
+/**
+ * Extracts A, B, C, D multiple-choice options from markdown text when present.
+ */
+function extractMcqOptions(markdownText: string): ParsedMcqOption[] {
+  if (!markdownText) return [];
+  const lines = markdownText.split('\n');
+  const found: Map<'A' | 'B' | 'C' | 'D', string> = new Map();
+
+  // Match lines like "A. ...", "A) ...", "**A.** ...", "**A)** ...", "- **A.** ..."
+  const optionRegex = /^\s*(?:[-*]\s*)?(?:\*\*)?([A-D])(?:[.)]|\*\*:\s*|\*\*[.)])\s*(?:\*\*)?\s*(.+)$/i;
+
+  for (const line of lines) {
+    const match = line.match(optionRegex);
+    if (match) {
+      const letter = match[1].toUpperCase() as 'A' | 'B' | 'C' | 'D';
+      const cleanText = match[2].replace(/\*\*$/g, '').trim();
+      if (cleanText.length > 0) {
+        found.set(letter, cleanText);
+      }
+    }
+  }
+
+  if (found.has('A') && found.has('B') && found.has('C') && found.has('D')) {
+    return (['A', 'B', 'C', 'D'] as const).map((letter) => ({
+      letter,
+      text: found.get(letter)!
+    }));
+  }
+  return [];
+}
+
 const FlashcardMessage = ({
   data,
   onNext,
   isLatest,
   onSpeak,
-  isSpeaking
+  isSpeaking,
+  uid
 }: {
   data: any;
   onNext: (msg: string) => void;
   isLatest: boolean;
   onSpeak: (text: string) => void;
   isSpeaking: boolean;
+  uid?: string;
 }) => {
   const [selected, setSelected] = useState<number | null>(null);
+  const [savedToVault, setSavedToVault] = useState(false);
 
   const handleSelect = (idx: number) => {
     if (selected !== null) return;
     setSelected(idx);
+
+    // Automatically save missed ("Incorrect" or "I don't know") flashcards into the Missed & Flagged Vault
+    if (idx !== data.correctOptionIndex) {
+      saveVaultItem(
+        {
+          type: 'flashcard',
+          termOrQuestion: data.term,
+          domain: data.domain || 'General Healthcare Management',
+          options: data.options,
+          correctAnswer: data.options?.[data.correctOptionIndex] || '',
+          userAnswer: idx === -1 ? "I don't know" : data.options?.[idx] || '',
+          explanation: data.explanation || ''
+        },
+        uid
+      );
+      setSavedToVault(true);
+    }
+  };
+
+  const handleManualFlag = () => {
+    saveVaultItem(
+      {
+        type: 'flashcard',
+        termOrQuestion: data.term,
+        domain: data.domain || 'General Healthcare Management',
+        options: data.options,
+        correctAnswer: data.options?.[data.correctOptionIndex] || '',
+        explanation: data.explanation || '',
+        flaggedManually: true
+      },
+      uid
+    );
+    setSavedToVault(true);
   };
 
   return (
     <div className="w-full max-w-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm">
       <div className="flex items-center justify-between gap-2 mb-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-semibold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">
             Flashcard
           </span>
@@ -70,21 +157,41 @@ const FlashcardMessage = ({
               {data.domain}
             </span>
           )}
+          {savedToVault && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-full bg-rose-50 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-200/60 dark:border-rose-500/30">
+              <Bookmark className="w-3 h-3 fill-current" />
+              Saved to Vault
+            </span>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={() =>
-            onSpeak(
-              `${data.term}. ${
-                selected !== null ? data.explanation : data.options.join('. ')
-              }`
-            )
-          }
-          className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-          title={isSpeaking ? 'Stop audio' : 'Read aloud'}
-        >
-          {isSpeaking ? <Square className="w-4 h-4 fill-current" /> : <Volume2 className="w-4 h-4" />}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleManualFlag}
+            className={`p-1.5 rounded-lg transition-colors ${
+              savedToVault
+                ? 'text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-500/10'
+                : 'text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+            title={savedToVault ? 'Saved in Missed & Flagged Vault' : 'Flag flashcard for review'}
+          >
+            <Bookmark className={`w-4 h-4 ${savedToVault ? 'fill-current' : ''}`} />
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              onSpeak(
+                `${data.term}. ${
+                  selected !== null ? data.explanation : data.options.join('. ')
+                }`
+              )
+            }
+            className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            title={isSpeaking ? 'Stop audio' : 'Read aloud'}
+          >
+            {isSpeaking ? <Square className="w-4 h-4 fill-current" /> : <Volume2 className="w-4 h-4" />}
+          </button>
+        </div>
       </div>
       <div className="text-xl font-bold text-slate-900 dark:text-white mb-6">
         {data.term}
@@ -143,11 +250,11 @@ const FlashcardMessage = ({
                 </span>
               ) : selected === -1 ? (
                 <span className="text-slate-600 dark:text-slate-400 flex items-center gap-1">
-                  <Info className="w-5 h-5" /> Let's review this.
+                  <Info className="w-5 h-5" /> Saved to Vault for review.
                 </span>
               ) : (
                 <span className="text-red-600 dark:text-red-400 flex items-center gap-1">
-                  <XCircle className="w-5 h-5" /> Incorrect.
+                  <XCircle className="w-5 h-5" /> Incorrect — auto-saved to Vault.
                 </span>
               )}
             </div>
@@ -204,7 +311,12 @@ export default function ChatInterface({
   const [searchParams] = useSearchParams();
   const focusedDomainKey = searchParams.get('domain');
   const focusedDomainTitle = searchParams.get('domainTitle');
+  const isRemediationDrill = searchParams.get('remediation') === 'true';
   const navigate = useNavigate();
+
+  const currentUser = auth.currentUser || (isLocalGuestActive() ? getLocalGuestUser() : null);
+  const currentUid = currentUser?.uid;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -212,13 +324,39 @@ export default function ChatInterface({
   const [mode, setMode] = useState(initialMode);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingDepth>('MEDIUM');
   const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
+  const [flaggedMessageIndices, setFlaggedMessageIndices] = useState<Record<number, boolean>>({});
+  const [isReferenceOpen, setIsReferenceOpen] = useState(false);
+
+  // Exam Pace Timer state (for Diagnostic & Simulator)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [timerPaused, setTimerPaused] = useState(false);
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [title, setTitle] = useState(
-    focusedDomainTitle
+    isRemediationDrill
+      ? `Remediation Vault Drill${focusedDomainTitle ? `: ${focusedDomainTitle}` : ''}`
+      : focusedDomainTitle
       ? `Focused Session: ${focusedDomainTitle}`
       : initialTitle || ''
   );
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Run exam pace timer in diagnostic & simulator modes
+  useEffect(() => {
+    if ((mode !== 'diagnostic' && mode !== 'simulator') || timerPaused) {
+      return;
+    }
+    const interval = setInterval(() => {
+      setElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [mode, timerPaused]);
+
+  const formatDuration = (secs: number) => {
+    const mins = Math.floor(secs / 60);
+    const remSecs = secs % 60;
+    return `${mins}:${remSecs < 10 ? '0' : ''}${remSecs}`;
+  };
 
   useEffect(() => {
     return () => {
@@ -262,7 +400,6 @@ export default function ChatInterface({
       audio.onerror = () => setSpeakingIdx(null);
       await audio.play();
     } catch {
-      // Fallback to browser Web Speech API if TTS endpoint fails
       if ('speechSynthesis' in window) {
         const utterance = new SpeechSynthesisUtterance(
           text.replace(/[#*_`~>-]/g, ' ').slice(0, 1000)
@@ -276,15 +413,61 @@ export default function ChatInterface({
     }
   };
 
+  const handleFlagMessage = (msg: Message, idx: number) => {
+    const firstLine =
+      msg.text
+        .split('\n')
+        .map((l) => l.replace(/[#*>_-]/g, '').trim())
+        .find((l) => l.length > 15) || 'Flagged Executive Scenario';
+
+    saveVaultItem(
+      {
+        type: mode === 'simulator' ? 'simulator' : 'diagnostic',
+        termOrQuestion: firstLine.slice(0, 220),
+        domain: focusedDomainTitle || (mode === 'simulator' ? 'BOG Simulator Scenario' : 'Diagnostic Assessment'),
+        explanation: msg.text.slice(0, 1400),
+        flaggedManually: true
+      },
+      currentUid
+    );
+
+    setFlaggedMessageIndices((prev) => ({ ...prev, [idx]: true }));
+  };
+
+  // Compute effective domainFocus string including remediation vault context if active
+  const effectiveDomainFocus = useMemo(() => {
+    if (isRemediationDrill) {
+      const vaultItems = getVaultItems(currentUid).slice(0, 8);
+      if (vaultItems.length > 0) {
+        const missedSummary = vaultItems
+          .map((v) => `${v.termOrQuestion} (${v.domain})`)
+          .join('; ');
+        return `${
+          focusedDomainTitle ? `${focusedDomainTitle} — ` : ''
+        }Remediation Drill specifically targeting these previously missed/flagged concepts: ${missedSummary}`;
+      }
+    }
+    return focusedDomainTitle || undefined;
+  }, [isRemediationDrill, focusedDomainTitle, currentUid]);
+
   useEffect(() => {
     const loadSession = async () => {
       if (sessionId) {
         setLoading(true);
         try {
-          const sessionRef = doc(db, 'sessions', sessionId);
-          const sessionSnap = await getDoc(sessionRef);
-          if (sessionSnap.exists()) {
-            const data = sessionSnap.data();
+          let data: any = null;
+          if (sessionId.startsWith('local_sess_') || isLocalGuestActive()) {
+            data = getLocalSessionById(sessionId);
+          }
+          if (!data && auth.currentUser) {
+            const sessionRef = doc(db, 'sessions', sessionId);
+            const sessionSnap = await getDoc(sessionRef);
+            if (sessionSnap.exists()) {
+              data = sessionSnap.data();
+            }
+          }
+
+          if (data) {
             const loadedMessages = JSON.parse(data.history);
             setMessages(loadedMessages);
 
@@ -334,10 +517,10 @@ export default function ChatInterface({
     try {
       if (mode === 'flashcards') {
         const responseText = await getFlashcard([], {
-          domainFocus: focusedDomainTitle || undefined
+          domainFocus: effectiveDomainFocus
         });
         setMessages([{ role: 'model', text: responseText }]);
-      } else if (mode === 'deepdive' && !focusedDomainTitle) {
+      } else if (mode === 'deepdive' && !effectiveDomainFocus) {
         setMessages([
           {
             role: 'model',
@@ -346,8 +529,8 @@ export default function ChatInterface({
         ]);
       } else if (mode === 'diagnostic' || mode === 'simulator' || mode === 'deepdive') {
         const deepDiveQuery =
-          mode === 'deepdive' && focusedDomainTitle
-            ? `Targeted Executive Deep Dive for ACHE Board of Governors Exam Domain: ${focusedDomainTitle}. Provide high-yield principles, regulatory and operational frameworks, clinical/management scenarios, and practice question drills to master this domain.`
+          mode === 'deepdive' && effectiveDomainFocus
+            ? `Targeted Executive Deep Dive for ACHE Board of Governors Exam Domain: ${effectiveDomainFocus}. Provide high-yield principles, regulatory and operational frameworks, clinical/management scenarios, and practice question drills to master this domain.`
             : undefined;
 
         setMessages([{ role: 'model', text: '' }]);
@@ -357,7 +540,7 @@ export default function ChatInterface({
             history: [],
             query: deepDiveQuery,
             thinkingLevel,
-            domainFocus: focusedDomainTitle || undefined
+            domainFocus: effectiveDomainFocus
           },
           (partialText) => {
             setMessages([{ role: 'model', text: partialText }]);
@@ -399,7 +582,7 @@ export default function ChatInterface({
     try {
       if (mode === 'flashcards') {
         const responseText = await getFlashcard(newMessages, {
-          domainFocus: focusedDomainTitle || undefined
+          domainFocus: effectiveDomainFocus
         });
         setMessages([...newMessages, { role: 'model', text: responseText }]);
       } else if (
@@ -414,7 +597,7 @@ export default function ChatInterface({
             history: mode === 'deepdive' ? cleanHistory : newMessages,
             query: mode === 'deepdive' ? userMessage : undefined,
             thinkingLevel,
-            domainFocus: focusedDomainTitle || undefined
+            domainFocus: effectiveDomainFocus
           },
           (partialText) => {
             setMessages([
@@ -455,7 +638,6 @@ export default function ChatInterface({
       handleInitialMessage();
     } else {
       const lastUserMsg = userMessages[userMessages.length - 1].text;
-      // Remove the last user message and trailing error model message before re-sending
       const withoutLastTurn = messages.slice(0, -2);
       setMessages(withoutLastTurn);
       sendMessage(lastUserMsg);
@@ -473,6 +655,7 @@ export default function ChatInterface({
 
   const handleRestart = async () => {
     setMessages([]);
+    setElapsedSeconds(0);
     await handleInitialMessage();
   };
 
@@ -484,33 +667,37 @@ export default function ChatInterface({
 
     setSaving(true);
     try {
-      const user = auth.currentUser;
-      if (user) {
-        const sessionData = {
-          uid: user.uid,
-          mode:
-            mode === 'diagnostic'
-              ? 'Diagnostic'
-              : mode === 'simulator'
-              ? 'Simulator'
-              : mode === 'flashcards'
-              ? 'Flashcards'
-              : 'DeepDive',
-          timestamp: new Date().toISOString(),
-          history: JSON.stringify(messages.filter((m) => !m.isError)),
-          summary: focusedDomainTitle
-            ? `Focused session on ${focusedDomainTitle} (${messages.length} messages)`
-            : `Session with ${messages.length} messages.`
-        };
+      const sessionData = {
+        uid: currentUid || 'local-executive-guest',
+        mode:
+          mode === 'diagnostic'
+            ? 'Diagnostic'
+            : mode === 'simulator'
+            ? 'Simulator'
+            : mode === 'flashcards'
+            ? 'Flashcards'
+            : 'DeepDive',
+        timestamp: new Date().toISOString(),
+        history: JSON.stringify(messages.filter((m) => !m.isError)),
+        summary: focusedDomainTitle
+          ? `Focused session on ${focusedDomainTitle} (${messages.length} messages)`
+          : `Session with ${messages.length} messages.`
+      };
 
-        if (sessionId) {
+      // Always save to local store as fast backup & for Local Executive Mode
+      saveLocalSession(sessionData, sessionId);
+      updateLocalProfile({ lastActive: new Date().toISOString() });
+
+      const fbUser = auth.currentUser;
+      if (fbUser) {
+        if (sessionId && !sessionId.startsWith('local_sess_')) {
           await updateDoc(doc(db, 'sessions', sessionId), sessionData);
         } else {
           await addDoc(collection(db, 'sessions'), sessionData);
         }
 
         try {
-          const userRef = doc(db, 'users', user.uid);
+          const userRef = doc(db, 'users', fbUser.uid);
           await updateDoc(userRef, {
             lastActive: new Date().toISOString()
           });
@@ -534,36 +721,52 @@ export default function ChatInterface({
       );
       const evaluation = JSON.parse(evaluationText);
 
-      const user = auth.currentUser;
-      if (user) {
-        const userRef = doc(db, 'users', user.uid);
-        const userSnap = await getDoc(userRef);
-        const currentData = userSnap.exists() ? userSnap.data() : {};
-        const existingHistory = Array.isArray(currentData?.domainHistory)
-          ? currentData.domainHistory
-          : [];
+      const newSnapshot = {
+        timestamp: new Date().toISOString(),
+        dateLabel: 'Today',
+        sessionMode:
+          mode === 'diagnostic'
+            ? 'Diagnostic Assessment'
+            : 'Simulator Evaluation',
+        compositeScore: Number(evaluation.overallScore) || 3.0,
+        scores: evaluation.domainScores || {}
+      };
 
-        const newSnapshot = {
-          timestamp: new Date().toISOString(),
-          dateLabel: 'Today',
-          sessionMode:
-            mode === 'diagnostic'
-              ? 'Diagnostic Assessment'
-              : 'Simulator Evaluation',
-          compositeScore: Number(evaluation.overallScore) || 3.0,
-          scores: evaluation.domainScores || {}
-        };
+      // Update Local Profile
+      const localProf = getLocalProfile();
+      const localHistory = Array.isArray(localProf?.domainHistory)
+        ? localProf.domainHistory
+        : [];
+      updateLocalProfile({
+        overallScore: evaluation.overallScore,
+        domainScores: evaluation.domainScores,
+        strengths: evaluation.strengths,
+        weaknesses: evaluation.weaknesses,
+        domainHistory: [...localHistory, newSnapshot].slice(-15)
+      });
 
-        const updatedHistory = [...existingHistory, newSnapshot].slice(-15);
+      const fbUser = auth.currentUser;
+      if (fbUser) {
+        try {
+          const userRef = doc(db, 'users', fbUser.uid);
+          const userSnap = await getDoc(userRef);
+          const currentData = userSnap.exists() ? userSnap.data() : {};
+          const existingHistory = Array.isArray(currentData?.domainHistory)
+            ? currentData.domainHistory
+            : [];
+          const updatedHistory = [...existingHistory, newSnapshot].slice(-15);
 
-        await updateDoc(userRef, {
-          overallScore: evaluation.overallScore,
-          domainScores: evaluation.domainScores,
-          strengths: evaluation.strengths,
-          weaknesses: evaluation.weaknesses,
-          domainHistory: updatedHistory,
-          lastActive: new Date().toISOString()
-        });
+          await updateDoc(userRef, {
+            overallScore: evaluation.overallScore,
+            domainScores: evaluation.domainScores,
+            strengths: evaluation.strengths,
+            weaknesses: evaluation.weaknesses,
+            domainHistory: updatedHistory,
+            lastActive: new Date().toISOString()
+          });
+        } catch (e) {
+          console.warn('Firestore evaluation update fell back to local storage:', e);
+        }
       }
 
       setMessages([
@@ -606,6 +809,9 @@ export default function ChatInterface({
       ? Math.min(100, (currentQuestion / totalQuestions) * 100)
       : 0;
 
+  const avgSecondsPerQuestion =
+    currentQuestion > 0 ? Math.round(elapsedSeconds / currentQuestion) : elapsedSeconds;
+
   const isAssessmentComplete =
     (mode === 'diagnostic' && currentQuestion >= 10) ||
     (mode === 'simulator' && currentQuestion >= 200);
@@ -614,6 +820,32 @@ export default function ChatInterface({
     messages.length > 0 &&
     messages[messages.length - 1].role === 'model' &&
     messages[messages.length - 1].text.includes('Assessment Complete');
+
+  // Detect parsed A/B/C/D options on the latest model message for interactive 1-tap answering
+  const latestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  const latestMcqOptions = useMemo(() => {
+    if (
+      (mode === 'diagnostic' || mode === 'simulator') &&
+      latestMessage &&
+      latestMessage.role === 'model' &&
+      !latestMessage.isError &&
+      !loading &&
+      !hasEvaluatedAlready
+    ) {
+      return extractMcqOptions(latestMessage.text);
+    }
+    return [];
+  }, [mode, latestMessage, loading, hasEvaluatedAlready]);
+
+  const showQuickLetterBar =
+    (mode === 'diagnostic' || mode === 'simulator') &&
+    latestMessage &&
+    latestMessage.role === 'model' &&
+    !latestMessage.isError &&
+    !loading &&
+    !isAssessmentComplete &&
+    !hasEvaluatedAlready &&
+    latestMcqOptions.length === 0;
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
@@ -630,13 +862,53 @@ export default function ChatInterface({
               {title}
             </h1>
           </div>
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+            {/* Exam Pace Timer Pill for Diagnostic & Simulator */}
+            {(mode === 'diagnostic' || mode === 'simulator') && (
+              <button
+                type="button"
+                onClick={() => setTimerPaused((p) => !p)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${
+                  timerPaused
+                    ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300'
+                    : avgSecondsPerQuestion > 72 && currentQuestion > 0
+                    ? 'bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300'
+                    : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                }`}
+                title="Exam Pace Timer (Official BOG Pace: 72s/question). Click to pause/resume."
+              >
+                <Timer className="w-3.5 h-3.5 text-indigo-500" />
+                <span className="tabular-nums">{formatDuration(elapsedSeconds)}</span>
+                {currentQuestion > 0 && (
+                  <span className="hidden sm:inline text-[10px] opacity-75">
+                    ({avgSecondsPerQuestion}s/q)
+                  </span>
+                )}
+                {timerPaused ? (
+                  <Play className="w-3 h-3" />
+                ) : (
+                  <Pause className="w-3 h-3 opacity-60" />
+                )}
+              </button>
+            )}
+
+            {/* Quick Reference & Formula Sheet Drawer Button */}
+            <button
+              type="button"
+              onClick={() => setIsReferenceOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 text-slate-700 dark:text-slate-200 hover:text-indigo-600 dark:hover:text-indigo-400 border border-slate-200 dark:border-slate-700 transition-colors"
+              title="Open Executive Formula & Statute Reference Sheet"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
+              <span className="hidden lg:inline">Formulas & Statutes</span>
+            </button>
+
             {mode !== 'flashcards' && (
               <div
                 className="hidden md:inline-flex items-center rounded-full bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700 text-xs"
                 title="Gemini 3 Reasoning Depth"
               >
-                <span className="pl-2.5 pr-1 text-slate-400 flex items-center">
+                <span className="pl-2 pr-1 text-slate-400 flex items-center">
                   <Brain className="w-3.5 h-3.5" />
                 </span>
                 {(['LOW', 'MEDIUM', 'HIGH'] as ThinkingDepth[]).map((lvl) => (
@@ -644,7 +916,7 @@ export default function ChatInterface({
                     key={lvl}
                     type="button"
                     onClick={() => setThinkingLevel(lvl)}
-                    className={`px-2.5 py-1 rounded-full font-semibold transition-all ${
+                    className={`px-2 py-1 rounded-full font-semibold transition-all ${
                       thinkingLevel === lvl
                         ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-400 shadow-xs'
                         : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
@@ -675,7 +947,7 @@ export default function ChatInterface({
             {!sessionId && messages.length > 1 && (
               <button
                 onClick={handleRestart}
-                className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors"
                 title="Restart Session"
               >
                 <RefreshCw className="w-4 h-4" />
@@ -685,7 +957,7 @@ export default function ChatInterface({
             <button
               onClick={handleSaveAndExit}
               disabled={saving}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 rounded-full transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs sm:text-sm font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 rounded-full transition-colors disabled:opacity-50"
             >
               {saving ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -697,7 +969,7 @@ export default function ChatInterface({
           </div>
         </div>
         {totalQuestions > 0 && (
-          <div className="border-t border-slate-100 dark:border-slate-800/50 px-4 py-2.5 bg-slate-50/50 dark:bg-slate-900/50 backdrop-blur-sm">
+          <div className="border-t border-slate-100 dark:border-slate-800/50 px-4 py-2 bg-slate-50/50 dark:bg-slate-900/50 backdrop-blur-sm">
             <div className="max-w-4xl mx-auto flex items-center gap-4">
               <div className="flex-1 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
                 <div
@@ -706,7 +978,7 @@ export default function ChatInterface({
                 />
               </div>
               <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap tabular-nums">
-                {Math.min(currentQuestion, totalQuestions)} / {totalQuestions}
+                Question {Math.min(currentQuestion + 1, totalQuestions)} of {totalQuestions}
               </span>
             </div>
           </div>
@@ -715,7 +987,7 @@ export default function ChatInterface({
 
       <main className="flex-1 overflow-y-auto p-4">
         <div className="max-w-3xl mx-auto space-y-6">
-          {focusedDomainTitle && (
+          {(focusedDomainTitle || isRemediationDrill) && (
             <div className="bg-gradient-to-r from-rose-50 to-indigo-50 dark:from-rose-950/20 dark:to-indigo-950/20 border border-rose-200 dark:border-rose-900/50 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-xs">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
@@ -723,20 +995,24 @@ export default function ChatInterface({
                 </div>
                 <div>
                   <span className="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
-                    Study Roadmap Focused Session
+                    {isRemediationDrill
+                      ? 'Missed & Flagged Vault Remediation'
+                      : 'Study Roadmap Focused Session'}
                   </span>
                   <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Targeted Review: {focusedDomainTitle}
+                    {isRemediationDrill
+                      ? `Drilling Missed Concepts${focusedDomainTitle ? ` (${focusedDomainTitle})` : ''}`
+                      : `Targeted Review: ${focusedDomainTitle}`}
                   </h3>
                 </div>
               </div>
               <span className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hidden sm:inline-block">
-                Priority 1 Gap Closure
+                High-Yield Gap Closure
               </span>
             </div>
           )}
 
-          {mode === 'deepdive' && !focusedDomainTitle && messages.length <= 1 && (
+          {mode === 'deepdive' && !focusedDomainTitle && !isRemediationDrill && messages.length <= 1 && (
             <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
               <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-2xl flex items-center justify-center mb-6">
                 <Info className="w-8 h-8" />
@@ -796,96 +1072,145 @@ export default function ChatInterface({
                     isLatest={isLatest}
                     onSpeak={(t) => handleSpeak(t, idx)}
                     isSpeaking={speakingIdx === idx}
+                    uid={currentUid}
                   />
                 </div>
               );
             }
 
+            const isFlagged = Boolean(flaggedMessageIndices[idx]);
+
             return (
-              <div
-                key={idx}
-                className={`flex ${
-                  msg.role === 'user' ? 'justify-end' : 'justify-start'
-                }`}
-              >
+              <div key={idx} className="space-y-3">
                 <div
-                  className={`max-w-[85%] rounded-2xl px-5 py-4 shadow-sm ${
-                    msg.role === 'user'
-                      ? 'bg-indigo-600 dark:bg-indigo-500 text-white rounded-br-sm'
-                      : msg.isError
-                      ? 'bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200 rounded-bl-sm'
-                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 rounded-bl-sm'
+                  className={`flex ${
+                    msg.role === 'user' ? 'justify-end' : 'justify-start'
                   }`}
                 >
-                  {msg.role === 'user' ? (
-                    <p className="whitespace-pre-wrap">{msg.text}</p>
-                  ) : (
-                    <div>
-                      <div className="prose prose-sm prose-slate dark:prose-invert max-w-none">
-                        <ReactMarkdown>{msg.text}</ReactMarkdown>
-                      </div>
-
-                      {msg.isError && (
-                        <div className="mt-3 pt-3 border-t border-rose-200/60 dark:border-rose-800/50 flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={handleRetry}
-                            disabled={loading}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold transition-colors"
-                          >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                            Retry Request
-                          </button>
+                  <div
+                    className={`max-w-[88%] sm:max-w-[85%] rounded-2xl px-5 py-4 shadow-sm ${
+                      msg.role === 'user'
+                        ? 'bg-indigo-600 dark:bg-indigo-500 text-white rounded-br-sm'
+                        : msg.isError
+                        ? 'bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200 rounded-bl-sm'
+                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 rounded-bl-sm'
+                    }`}
+                  >
+                    {msg.role === 'user' ? (
+                      <p className="whitespace-pre-wrap">{msg.text}</p>
+                    ) : (
+                      <div>
+                        <div className="prose prose-sm prose-slate dark:prose-invert max-w-none">
+                          <ReactMarkdown>{msg.text}</ReactMarkdown>
                         </div>
-                      )}
 
-                      {!msg.isError && msg.sources && msg.sources.length > 0 && (
-                        <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800">
-                          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-2">
-                            Grounded Search Sources
-                          </span>
-                          <div className="flex flex-wrap gap-2">
-                            {msg.sources.map((src, sIdx) => (
-                              <a
-                                key={sIdx}
-                                href={src.uri}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors max-w-xs truncate"
-                              >
-                                <ExternalLink className="w-3 h-3 shrink-0" />
-                                <span className="truncate">{src.title}</span>
-                              </a>
-                            ))}
+                        {msg.isError && (
+                          <div className="mt-3 pt-3 border-t border-rose-200/60 dark:border-rose-800/50 flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleRetry}
+                              disabled={loading}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold transition-colors"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              Retry Request
+                            </button>
                           </div>
-                        </div>
-                      )}
+                        )}
 
-                      {!msg.isError && msg.text && (
-                        <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800/60 flex items-center justify-end">
-                          <button
-                            type="button"
-                            onClick={() => handleSpeak(msg.text, idx)}
-                            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
-                            title={speakingIdx === idx ? 'Stop audio' : 'Listen to explanation'}
-                          >
-                            {speakingIdx === idx ? (
-                              <>
-                                <Square className="w-3.5 h-3.5 fill-current text-indigo-600 dark:text-indigo-400" />
-                                <span className="text-indigo-600 dark:text-indigo-400">Stop Audio</span>
-                              </>
+                        {!msg.isError && msg.sources && msg.sources.length > 0 && (
+                          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-2">
+                              Grounded Search Sources
+                            </span>
+                            <div className="flex flex-wrap gap-2">
+                              {msg.sources.map((src, sIdx) => (
+                                <a
+                                  key={sIdx}
+                                  href={src.uri}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors max-w-xs truncate"
+                                >
+                                  <ExternalLink className="w-3 h-3 shrink-0" />
+                                  <span className="truncate">{src.title}</span>
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {!msg.isError && msg.text && (
+                          <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800/60 flex items-center justify-between gap-3">
+                            {(mode === 'simulator' || mode === 'diagnostic') ? (
+                              <button
+                                type="button"
+                                onClick={() => handleFlagMessage(msg, idx)}
+                                className={`inline-flex items-center gap-1.5 text-xs font-medium transition-colors ${
+                                  isFlagged
+                                    ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                    : 'text-slate-400 hover:text-rose-600 dark:hover:text-rose-400'
+                                }`}
+                                title="Save scenario to Missed & Flagged Vault for review"
+                              >
+                                <Bookmark className={`w-3.5 h-3.5 ${isFlagged ? 'fill-current' : ''}`} />
+                                <span>{isFlagged ? 'Saved to Vault' : 'Flag for Review'}</span>
+                              </button>
                             ) : (
-                              <>
-                                <Volume2 className="w-3.5 h-3.5" />
-                                <span>Listen</span>
-                              </>
+                              <span />
                             )}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleSpeak(msg.text, idx)}
+                              className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                              title={speakingIdx === idx ? 'Stop audio' : 'Listen to explanation'}
+                            >
+                              {speakingIdx === idx ? (
+                                <>
+                                  <Square className="w-3.5 h-3.5 fill-current text-indigo-600 dark:text-indigo-400" />
+                                  <span className="text-indigo-600 dark:text-indigo-400">Stop Audio</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Volume2 className="w-3.5 h-3.5" />
+                                  <span>Listen</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
+
+                {/* Interactive 1-Tap A/B/C/D Choice Cards for Latest Diagnostic/Simulator Question */}
+                {isLatest && latestMcqOptions.length === 4 && (
+                  <div className="pl-1 sm:pl-2 max-w-[88%] sm:max-w-[85%] space-y-2">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 px-1">
+                      Tap an option to submit your answer:
+                    </p>
+                    <div className="grid grid-cols-1 gap-2">
+                      {latestMcqOptions.map((opt) => (
+                        <button
+                          key={opt.letter}
+                          type="button"
+                          disabled={loading}
+                          onClick={() => sendMessage(`${opt.letter}. ${opt.text}`)}
+                          className="group flex items-start gap-3 text-left p-3.5 rounded-2xl bg-white dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-500 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/30 transition-all shadow-xs active:scale-[0.99]"
+                        >
+                          <span className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 group-hover:bg-indigo-600 group-hover:text-white font-bold text-xs flex items-center justify-center shrink-0 mt-0.5 transition-colors">
+                            {opt.letter}
+                          </span>
+                          <span className="text-xs sm:text-sm font-medium text-slate-800 dark:text-slate-200 leading-relaxed">
+                            {opt.text}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -906,6 +1231,32 @@ export default function ChatInterface({
 
       <footer className="bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 p-4 transition-colors duration-200">
         <div className="max-w-3xl mx-auto">
+          {/* Fallback Quick-Tap A / B / C / D / Next Question Chips for Diagnostic & Simulator */}
+          {showQuickLetterBar && (
+            <div className="flex items-center justify-center gap-2 mb-3 flex-wrap">
+              <span className="text-xs font-semibold text-slate-400 dark:text-slate-500 mr-1">
+                Quick Answer:
+              </span>
+              {(['A', 'B', 'C', 'D'] as const).map((letter) => (
+                <button
+                  key={letter}
+                  type="button"
+                  onClick={() => sendMessage(`Option ${letter}`)}
+                  className="px-4 py-1.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-600 hover:text-white transition-all shadow-2xs"
+                >
+                  Option {letter}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => sendMessage('Next question please.')}
+                className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+              >
+                Next Question &rarr;
+              </button>
+            </div>
+          )}
+
           {mode === 'deepdive' &&
             messages.length > 1 &&
             !loading &&
@@ -967,7 +1318,7 @@ export default function ChatInterface({
                 placeholder={
                   isAssessmentComplete
                     ? 'Assessment complete. You can still ask questions...'
-                    : 'Type your answer or question...'
+                    : 'Tap an option above or type your answer / follow-up question...'
                 }
                 className="w-full bg-slate-100 dark:bg-slate-800 border border-transparent focus:bg-white dark:focus:bg-slate-900 focus:border-indigo-500 dark:focus:border-indigo-500/50 focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-500/20 rounded-full pl-6 pr-14 py-4 text-slate-900 dark:text-white transition-all outline-none"
                 disabled={loading}
@@ -983,6 +1334,17 @@ export default function ChatInterface({
           )}
         </div>
       </footer>
+
+      {/* Searchable Executive Reference & Formula Sheet Modal */}
+      <ExecutiveReferenceModal
+        isOpen={isReferenceOpen}
+        onClose={() => setIsReferenceOpen(false)}
+        onSelectForDeepDive={
+          mode === 'deepdive'
+            ? (topicTitle) => sendMessage(`Provide an executive deep dive and BOG exam application for: ${topicTitle}`)
+            : undefined
+        }
+      />
     </div>
   );
 }

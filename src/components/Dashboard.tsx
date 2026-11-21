@@ -1,19 +1,67 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Activity, Target, Layers, Search, LogOut, Award, TrendingUp, TrendingDown, Trash2, BarChart2, BookOpen, ArrowRight, Compass, Zap, Flame, Trophy, X, Download, FileText } from 'lucide-react';
+import {
+  Activity,
+  Target,
+  Layers,
+  Search,
+  LogOut,
+  Award,
+  TrendingUp,
+  TrendingDown,
+  Trash2,
+  BarChart2,
+  BookOpen,
+  ArrowRight,
+  Compass,
+  Zap,
+  Flame,
+  X,
+  Download,
+  Bookmark
+} from 'lucide-react';
 import { doc, getDoc, collection, query, where, getDocs, deleteDoc } from 'firebase/firestore';
 import { logout, db } from '../firebase';
+import {
+  LOCAL_GUEST_UID,
+  getLocalProfile,
+  getLocalSessions,
+  deleteLocalSession
+} from '../services/localStore';
+import { getVaultItems, VaultItem } from '../services/vaultService';
 import ThemeToggle from './ThemeToggle';
-import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
+import {
+  Radar,
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  ResponsiveContainer,
+  Tooltip
+} from 'recharts';
 import ProgressAnalytics, { ACHE_DOMAINS } from './ProgressAnalytics';
 import StudyRoadmap from './StudyRoadmap';
 import BadgeSystem, { ExecutiveHonorsWidget } from './BadgeSystem';
 import ExportSummaryModal from './ExportSummaryModal';
-import { calculateStreakStats, evaluateBadges, syncBadgesAndStreak, EvaluatedBadge, StreakStats } from '../services/badgeService';
+import ExecutiveReferenceModal from './ExecutiveReferenceModal';
+import MissedVaultModal from './MissedVaultModal';
+import {
+  calculateStreakStats,
+  evaluateBadges,
+  syncBadgesAndStreak,
+  EvaluatedBadge,
+  StreakStats
+} from '../services/badgeService';
 
 export type DashboardTab = 'modules' | 'roadmap' | 'analytics' | 'badges';
 
-export default function Dashboard({ user, initialTab = 'modules' }: { user: any; initialTab?: DashboardTab }) {
+export default function Dashboard({
+  user,
+  initialTab = 'modules'
+}: {
+  user: any;
+  initialTab?: DashboardTab;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
@@ -31,6 +79,13 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
   const [allSessions, setAllSessions] = useState<any[]>([]);
   const [toastBadge, setToastBadge] = useState<EvaluatedBadge | null>(null);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isReferenceModalOpen, setIsReferenceModalOpen] = useState(false);
+  const [isVaultModalOpen, setIsVaultModalOpen] = useState(false);
+  const [vaultItems, setVaultItems] = useState<VaultItem[]>([]);
+
+  useEffect(() => {
+    setVaultItems(getVaultItems(user?.uid));
+  }, [user?.uid]);
 
   useEffect(() => {
     const tabParam = searchParams.get('tab');
@@ -51,23 +106,37 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    if (!window.confirm("Are you sure you want to delete this session?")) return;
+    if (!window.confirm('Are you sure you want to delete this session?')) return;
     try {
-      await deleteDoc(doc(db, 'sessions', sessionId));
-      setSessions(sessions.filter(s => s.id !== sessionId));
-      setAllSessions(allSessions.filter(s => s.id !== sessionId));
+      deleteLocalSession(sessionId);
+      if (user?.uid !== LOCAL_GUEST_UID && !sessionId.startsWith('local_sess_')) {
+        await deleteDoc(doc(db, 'sessions', sessionId));
+      }
+      setSessions(sessions.filter((s) => s.id !== sessionId));
+      setAllSessions(allSessions.filter((s) => s.id !== sessionId));
     } catch (error) {
-      console.error("Error deleting session:", error);
+      console.error('Error deleting session:', error);
     }
   };
 
   useEffect(() => {
     const fetchProfile = async () => {
+      if (user?.uid === LOCAL_GUEST_UID) {
+        setProfile(getLocalProfile());
+        return;
+      }
       if (user?.uid) {
-        const userRef = doc(db, 'users', user.uid);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          setProfile(userSnap.data());
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            setProfile(userSnap.data());
+          } else {
+            setProfile(getLocalProfile());
+          }
+        } catch (err) {
+          console.warn('Falling back to local profile:', err);
+          setProfile(getLocalProfile());
         }
       }
     };
@@ -76,30 +145,40 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
 
   useEffect(() => {
     const fetchSessions = async () => {
-      if (user?.uid) {
-        const q = query(
-          collection(db, 'sessions'),
-          where('uid', '==', user.uid)
+      const populateSessions = (sessionsData: any[]) => {
+        sessionsData.sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
         );
+        setAllSessions(sessionsData);
+
+        const uniqueModes = new Set();
+        const filteredSessions = [];
+        for (const session of sessionsData) {
+          if (!uniqueModes.has(session.mode)) {
+            uniqueModes.add(session.mode);
+            filteredSessions.push(session);
+          }
+        }
+        setSessions(filteredSessions.slice(0, 5));
+      };
+
+      if (user?.uid === LOCAL_GUEST_UID) {
+        populateSessions(getLocalSessions());
+        return;
+      }
+
+      if (user?.uid) {
+        const q = query(collection(db, 'sessions'), where('uid', '==', user.uid));
         try {
           const querySnapshot = await getDocs(q);
-          const sessionsData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as any[];
-          sessionsData.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-          
-          setAllSessions(sessionsData);
-
-          const uniqueModes = new Set();
-          const filteredSessions = [];
-          for (const session of sessionsData) {
-            if (!uniqueModes.has(session.mode)) {
-              uniqueModes.add(session.mode);
-              filteredSessions.push(session);
-            }
-          }
-          
-          setSessions(filteredSessions.slice(0, 5));
+          const sessionsData = querySnapshot.docs.map((d) => ({
+            id: d.id,
+            ...d.data()
+          })) as any[];
+          populateSessions(sessionsData);
         } catch (error) {
-          console.error("Error fetching sessions:", error);
+          console.warn('Error fetching Firestore sessions, using local sessions:', error);
+          populateSessions(getLocalSessions());
         }
       }
     };
@@ -115,7 +194,7 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
     return evaluateBadges(profile, allSessions, streakStats);
   }, [profile, allSessions, streakStats]);
 
-  // Sync unlocked badges and streak to Firestore in the background
+  // Sync unlocked badges and streak in the background
   useEffect(() => {
     if (user?.uid && profile) {
       syncBadgesAndStreak(user.uid, profile, allSessions)
@@ -132,14 +211,14 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
 
   const { strongestDomain, weakestDomain, radarData } = useMemo(() => {
     const rawScores = profile?.domainScores || {};
-    const scores = ACHE_DOMAINS.map(d => ({
+    const scores = ACHE_DOMAINS.map((d) => ({
       key: d.key,
       domain: d.shortLabel,
       fullTitle: d.title,
       score: typeof rawScores[d.key] === 'number' ? Number(rawScores[d.key]) : 0
     }));
 
-    const assessedScores = scores.filter(s => s.score > 0);
+    const assessedScores = scores.filter((s) => s.score > 0);
     if (assessedScores.length === 0) {
       return { strongestDomain: null, weakestDomain: null, radarData: scores };
     }
@@ -151,6 +230,19 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
       radarData: scores
     };
   }, [profile]);
+
+  const handleLaunchRemediationDrill = (specificItem?: VaultItem) => {
+    if (specificItem) {
+      const modeTarget = specificItem.type === 'flashcard' ? 'flashcards' : 'simulator';
+      navigate(
+        `/mode/${modeTarget}?remediation=true&domainTitle=${encodeURIComponent(
+          `${specificItem.domain}: ${specificItem.termOrQuestion.slice(0, 60)}`
+        )}`
+      );
+    } else {
+      navigate('/mode/flashcards?remediation=true');
+    }
+  };
 
   const modes = [
     {
@@ -164,7 +256,7 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
     {
       id: 'simulator',
       title: 'Weighted Scenario Simulator',
-      description: '200-Question Blueprint mock exam.',
+      description: '200-Question Blueprint mock exam with 1-tap options & pace timer.',
       icon: Target,
       color: 'bg-emerald-500 dark:bg-emerald-600',
       path: '/mode/simulator'
@@ -172,7 +264,7 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
     {
       id: 'flashcards',
       title: 'Rapid-Fire Flashcards',
-      description: 'Drill official ACHE 415-card set concepts.',
+      description: 'Drill official ACHE 415-card set concepts with auto-saved remediation vault.',
       icon: Layers,
       color: 'bg-amber-500 dark:bg-amber-600',
       path: '/mode/flashcards'
@@ -180,7 +272,7 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
     {
       id: 'deepdive',
       title: 'The Deep Dive',
-      description: 'Search and explain complex concepts.',
+      description: 'Search and explain complex concepts with grounded sources.',
       icon: Search,
       color: 'bg-purple-500 dark:bg-purple-600',
       path: '/mode/deepdive'
@@ -188,23 +280,48 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
   ];
 
   const modeTitles: Record<string, string> = {
-    'Diagnostic': 'Diagnostic Assessment',
-    'Simulator': 'Weighted Scenario Simulator',
-    'Flashcards': 'Rapid-Fire Flashcards',
-    'DeepDive': 'The Deep Dive'
+    Diagnostic: 'Diagnostic Assessment',
+    Simulator: 'Weighted Scenario Simulator',
+    Flashcards: 'Rapid-Fire Flashcards',
+    DeepDive: 'The Deep Dive'
   };
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
       <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10 transition-colors duration-200">
-        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between gap-2">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-indigo-100 dark:bg-indigo-500/20 rounded-lg flex items-center justify-center">
               <Activity className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             </div>
-            <span className="font-bold text-slate-900 dark:text-white text-lg tracking-tight">FACHE Exam Tutor</span>
+            <span className="font-bold text-slate-900 dark:text-white text-lg tracking-tight">
+              FACHE Exam Tutor
+            </span>
           </div>
-          <div className="flex items-center gap-3 sm:gap-4">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button
+              onClick={() => setIsReferenceModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs transition-colors"
+              title="Open ACHE Executive Formula & Regulatory Reference Sheet"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
+              <span className="hidden md:inline">Reference Sheet</span>
+            </button>
+
+            <button
+              onClick={() => setIsVaultModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs transition-colors"
+              title="Open Missed & Flagged Concepts Vault"
+            >
+              <Bookmark className="w-3.5 h-3.5 text-rose-500" />
+              <span className="hidden md:inline">Vault</span>
+              {vaultItems.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-rose-100 dark:bg-rose-500/20 text-rose-700 dark:text-rose-300 text-[10px] font-bold">
+                  {vaultItems.length}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={() => setIsExportModalOpen(true)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs transition-colors"
@@ -215,7 +332,7 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
             </button>
             <ThemeToggle />
             <div className="h-6 w-px bg-slate-200 dark:bg-slate-700 hidden sm:block"></div>
-            <span className="text-sm font-medium text-slate-600 dark:text-slate-300 hidden sm:block">
+            <span className="text-sm font-medium text-slate-600 dark:text-slate-300 hidden lg:block truncate max-w-[160px]">
               {user.displayName || user.email}
             </span>
             <button
@@ -246,10 +363,10 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
               {activeTab === 'analytics'
                 ? 'Data visualization dashboard with Recharts tracking domain mastery velocity over time and 10-domain blueprint radar analytics.'
                 : activeTab === 'roadmap'
-                ? 'Top 3 priority focus areas based on your lowest Firestore scores with focused session launcher.'
+                ? 'Top 3 priority focus areas based on your lowest scores with focused session launcher.'
                 : activeTab === 'badges'
                 ? 'Study streak tracking, daily habits, and competency milestone awards across the 10 exam domains.'
-                : 'Select an official prep mode, track your streak, or follow your personalized roadmap.'}
+                : 'Select an official prep mode, review your missed-concept vault, or follow your personalized roadmap.'}
             </p>
           </div>
 
@@ -304,7 +421,9 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
               <Flame className="w-4 h-4 text-amber-500" />
               <span>Honors & Streaks</span>
               <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 font-bold">
-                {streakStats.currentStreak > 0 ? `${streakStats.currentStreak}d` : `${evaluatedBadges.filter(b => b.isUnlocked).length} Earned`}
+                {streakStats.currentStreak > 0
+                  ? `${streakStats.currentStreak}d`
+                  : `${evaluatedBadges.filter((b) => b.isUnlocked).length} Earned`}
               </span>
             </button>
           </div>
@@ -349,12 +468,61 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
               />
             </div>
 
+            {/* Missed & Flagged Remediation Vault Quick Banner */}
+            {vaultItems.length > 0 && (
+              <div className="mb-8 p-5 sm:p-6 rounded-3xl bg-gradient-to-r from-rose-50 via-white to-indigo-50/40 dark:from-rose-950/30 dark:via-slate-900 dark:to-indigo-950/20 border border-rose-200/80 dark:border-rose-900/50 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-start gap-3.5">
+                  <div className="w-12 h-12 rounded-2xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-rose-600/20">
+                    <Bookmark className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
+                        Missed & Flagged Concepts Vault
+                      </h3>
+                      <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-rose-100 dark:bg-rose-500/20 text-rose-700 dark:text-rose-300">
+                        {vaultItems.length} Needs Review
+                      </span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 mt-0.5">
+                      Latest saved:{' '}
+                      <strong className="text-slate-800 dark:text-slate-100">
+                        {vaultItems[0].termOrQuestion.slice(0, 75)}
+                        {vaultItems[0].termOrQuestion.length > 75 ? '...' : ''}
+                      </strong>{' '}
+                      ({vaultItems[0].domain})
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setIsVaultModalOpen(true)}
+                    className="px-3.5 py-2.5 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 transition-colors"
+                  >
+                    Inspect Vault
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleLaunchRemediationDrill()}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-sm transition-colors"
+                  >
+                    <Zap className="w-3.5 h-3.5 fill-white" />
+                    <span>Drill Missed Concepts</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {profile && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 sm:p-8 shadow-sm mb-8">
                 <div className="flex flex-col lg:flex-row gap-8 items-center">
                   <div className="flex-1 w-full">
                     <div className="flex items-center justify-between mb-5">
-                      <h3 className="text-xl font-bold text-slate-900 dark:text-white">Readiness Overview</h3>
+                      <h3 className="text-xl font-bold text-slate-900 dark:text-white">
+                        Readiness Overview
+                      </h3>
                       <button
                         onClick={() => handleTabChange('analytics')}
                         className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1"
@@ -369,9 +537,13 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
                           <Award className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
                         </div>
                         <div>
-                          <p className="text-sm text-slate-500 dark:text-slate-400 font-medium tracking-wide">Overall Score</p>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 font-medium tracking-wide">
+                            Overall Score
+                          </p>
                           <p className="text-2xl font-bold text-slate-900 dark:text-white">
-                            {profile.overallScore > 0 ? `${profile.overallScore} / 5` : 'Not Assessed'}
+                            {profile.overallScore > 0
+                              ? `${profile.overallScore} / 5`
+                              : 'Not Assessed'}
                           </p>
                         </div>
                       </div>
@@ -382,9 +554,14 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
                             <TrendingUp className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
                           </div>
                           <div>
-                            <p className="text-sm text-emerald-600 dark:text-emerald-400 font-medium tracking-wide">Strongest Area</p>
+                            <p className="text-sm text-emerald-600 dark:text-emerald-400 font-medium tracking-wide">
+                              Strongest Area
+                            </p>
                             <p className="text-lg font-bold text-slate-900 dark:text-white">
-                              {strongestDomain.fullTitle} <span className="text-emerald-600 dark:text-emerald-400 ml-1">({strongestDomain.score}/5)</span>
+                              {strongestDomain.fullTitle}{' '}
+                              <span className="text-emerald-600 dark:text-emerald-400 ml-1">
+                                ({strongestDomain.score}/5)
+                              </span>
                             </p>
                           </div>
                         </div>
@@ -396,13 +573,24 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
                             <TrendingDown className="w-6 h-6 text-rose-600 dark:text-rose-400" />
                           </div>
                           <div className="flex-1">
-                            <p className="text-sm text-rose-600 dark:text-rose-400 font-medium tracking-wide">Weakest Area (Priority 1)</p>
+                            <p className="text-sm text-rose-600 dark:text-rose-400 font-medium tracking-wide">
+                              Weakest Area (Priority 1)
+                            </p>
                             <p className="text-lg font-bold text-slate-900 dark:text-white">
-                              {weakestDomain.fullTitle} <span className="text-rose-600 dark:text-rose-400 ml-1">({weakestDomain.score}/5)</span>
+                              {weakestDomain.fullTitle}{' '}
+                              <span className="text-rose-600 dark:text-rose-400 ml-1">
+                                ({weakestDomain.score}/5)
+                              </span>
                             </p>
                           </div>
-                          <button 
-                            onClick={() => navigate(`/mode/deepdive?domain=${weakestDomain.key}&domainTitle=${encodeURIComponent(weakestDomain.fullTitle)}`)}
+                          <button
+                            onClick={() =>
+                              navigate(
+                                `/mode/deepdive?domain=${
+                                  weakestDomain.key
+                                }&domainTitle=${encodeURIComponent(weakestDomain.fullTitle)}`
+                              )
+                            }
                             className="px-3 py-1.5 text-sm font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors flex items-center gap-1.5 shadow-xs"
                           >
                             <Zap className="w-3.5 h-3.5" />
@@ -435,9 +623,18 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
                       <ResponsiveContainer width="100%" height="100%">
                         <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
                           <PolarGrid stroke="#94a3b8" strokeDasharray="3 3" />
-                          <PolarAngleAxis dataKey="domain" tick={{ fill: '#64748b', fontSize: 10, fontWeight: 500 }} />
+                          <PolarAngleAxis
+                            dataKey="domain"
+                            tick={{ fill: '#64748b', fontSize: 10, fontWeight: 500 }}
+                          />
                           <PolarRadiusAxis angle={30} domain={[0, 5]} tick={{ fill: '#64748b' }} />
-                          <Radar name="Score" dataKey="score" stroke="#6366f1" fill="#6366f1" fillOpacity={0.4} />
+                          <Radar
+                            name="Score"
+                            dataKey="score"
+                            stroke="#6366f1"
+                            fill="#6366f1"
+                            fillOpacity={0.4}
+                          />
                           <Tooltip />
                         </RadarChart>
                       </ResponsiveContainer>
@@ -455,36 +652,46 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
               />
             </div>
 
-            {profile && profile.strengths && profile.weaknesses && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
-                <div className="bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-900/50 rounded-2xl p-6 shadow-sm">
-                  <h3 className="text-lg font-bold text-emerald-800 dark:text-emerald-400 mb-4 flex items-center gap-2">
-                    <Activity className="w-5 h-5" /> Your Strengths
-                  </h3>
-                  <ul className="space-y-2">
-                    {profile.strengths.map((strength: string, idx: number) => (
-                      <li key={idx} className="text-slate-700 dark:text-slate-300 flex items-start gap-2">
-                        <span className="text-emerald-500 mt-1">•</span>
-                        <span>{strength}</span>
-                      </li>
-                    ))}
-                  </ul>
+            {profile &&
+              Array.isArray(profile.strengths) &&
+              profile.strengths.length > 0 &&
+              Array.isArray(profile.weaknesses) &&
+              profile.weaknesses.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
+                  <div className="bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-900/50 rounded-2xl p-6 shadow-sm">
+                    <h3 className="text-lg font-bold text-emerald-800 dark:text-emerald-400 mb-4 flex items-center gap-2">
+                      <Activity className="w-5 h-5" /> Your Strengths
+                    </h3>
+                    <ul className="space-y-2">
+                      {profile.strengths.map((strength: string, idx: number) => (
+                        <li
+                          key={idx}
+                          className="text-slate-700 dark:text-slate-300 flex items-start gap-2"
+                        >
+                          <span className="text-emerald-500 mt-1">•</span>
+                          <span>{strength}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-900/50 rounded-2xl p-6 shadow-sm">
+                    <h3 className="text-lg font-bold text-amber-800 dark:text-amber-400 mb-4 flex items-center gap-2">
+                      <Target className="w-5 h-5" /> Areas to Study
+                    </h3>
+                    <ul className="space-y-2">
+                      {profile.weaknesses.map((weakness: string, idx: number) => (
+                        <li
+                          key={idx}
+                          className="text-slate-700 dark:text-slate-300 flex items-start gap-2"
+                        >
+                          <span className="text-amber-500 mt-1">•</span>
+                          <span>{weakness}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
-                <div className="bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-900/50 rounded-2xl p-6 shadow-sm">
-                  <h3 className="text-lg font-bold text-amber-800 dark:text-amber-400 mb-4 flex items-center gap-2">
-                    <Target className="w-5 h-5" /> Areas to Study
-                  </h3>
-                  <ul className="space-y-2">
-                    {profile.weaknesses.map((weakness: string, idx: number) => (
-                      <li key={idx} className="text-slate-700 dark:text-slate-300 flex items-start gap-2">
-                        <span className="text-amber-500 mt-1">•</span>
-                        <span>{weakness}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            )}
+              )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
               {modes.map((mode) => (
@@ -493,7 +700,9 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
                   onClick={() => navigate(mode.path)}
                   className="group flex flex-col items-start p-8 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl dark:hover:shadow-indigo-900/10 hover:border-indigo-200 dark:hover:border-indigo-500/50 transition-all duration-300 text-left transform hover:-translate-y-1"
                 >
-                  <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-6 shadow-md ${mode.color}`}>
+                  <div
+                    className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-6 shadow-md ${mode.color}`}
+                  >
                     <mode.icon className="w-7 h-7" />
                   </div>
                   <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-3 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
@@ -507,20 +716,27 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
             </div>
 
             <div>
-              <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-4">Recent Sessions</h2>
+              <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-4">
+                Recent Sessions
+              </h2>
               {sessions.length > 0 ? (
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
                   {sessions.map((session, index) => (
-                    <div 
-                      key={session.id} 
-                      className={`p-5 flex items-center justify-between ${index !== sessions.length - 1 ? 'border-b border-slate-100 dark:border-slate-800' : ''}`}
+                    <div
+                      key={session.id}
+                      className={`p-5 flex items-center justify-between ${
+                        index !== sessions.length - 1
+                          ? 'border-b border-slate-100 dark:border-slate-800'
+                          : ''
+                      }`}
                     >
                       <div>
                         <h3 className="font-semibold text-slate-900 dark:text-white mb-1">
                           {modeTitles[session.mode] || session.mode}
                         </h3>
                         <p className="text-sm text-slate-500 dark:text-slate-400">
-                          {new Date(session.timestamp).toLocaleDateString()} at {new Date(session.timestamp).toLocaleTimeString()}
+                          {new Date(session.timestamp).toLocaleDateString()} at{' '}
+                          {new Date(session.timestamp).toLocaleTimeString()}
                         </p>
                       </div>
                       <div className="flex items-center gap-3">
@@ -543,7 +759,9 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
                 </div>
               ) : (
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 text-center shadow-sm">
-                  <p className="text-slate-500 dark:text-slate-400">No recent sessions found. Start a study mode to see your history here.</p>
+                  <p className="text-slate-500 dark:text-slate-400">
+                    No recent sessions found. Start a study mode to see your history here.
+                  </p>
                 </div>
               )}
             </div>
@@ -593,6 +811,25 @@ export default function Dashboard({ user, initialTab = 'modules' }: { user: any;
         onClose={() => setIsExportModalOpen(false)}
         user={user}
         profile={profile}
+      />
+
+      {/* Searchable Executive Reference & Formula Sheet Modal */}
+      <ExecutiveReferenceModal
+        isOpen={isReferenceModalOpen}
+        onClose={() => setIsReferenceModalOpen(false)}
+        onSelectForDeepDive={(topicTitle) =>
+          navigate(`/mode/deepdive?domainTitle=${encodeURIComponent(topicTitle)}`)
+        }
+      />
+
+      {/* Missed & Flagged Concepts Remediation Vault Modal */}
+      <MissedVaultModal
+        isOpen={isVaultModalOpen}
+        onClose={() => setIsVaultModalOpen(false)}
+        items={vaultItems}
+        uid={user?.uid}
+        onItemsChanged={(updated) => setVaultItems(updated)}
+        onLaunchRemediationDrill={handleLaunchRemediationDrill}
       />
     </div>
   );
