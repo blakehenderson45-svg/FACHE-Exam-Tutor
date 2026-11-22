@@ -1,5 +1,5 @@
 import express from 'express';
-import { geminiApiRouter } from '../src/server/geminiApi';
+import { geminiApiRouter } from '../src/server/geminiApi.js';
 
 const app = express();
 
